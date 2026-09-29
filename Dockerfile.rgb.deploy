@@ -1,0 +1,37 @@
+# 基于 dvlc:superglue，打 RGB 补丁 + 重编，viewer 里点云用彩色 RGB 上色
+FROM dvlc:superglue
+
+# 1) preprocess_ros2: 保留 BGR
+RUN sed -i 's/"mono8"/"bgr8"/g' \
+    /root/ros2_ws/src/direct_visual_lidar_calibration/src/preprocess_ros2.cpp
+
+# 2) visual_lidar_data: 用 IMREAD_COLOR 读回 3ch
+RUN sed -i 's|cv::imread(data_path + "/" + bag_name + ".png", 0);|cv::imread(data_path + "/" + bag_name + ".png", cv::IMREAD_COLOR);|' \
+    /root/ros2_ws/src/direct_visual_lidar_calibration/src/vlcal/common/visual_lidar_data.cpp
+
+# 3) visualizer:71 —— 直接把图作为 BGR 用（去掉 GRAY2BGR）
+RUN sed -i 's|cv::cvtColor(dataset\[selected_bag_id\]->image, bgr, cv::COLOR_GRAY2BGR);|bgr = dataset[selected_bag_id]->image.channels() == 3 ? dataset[selected_bag_id]->image : (cv::cvtColor(dataset[selected_bag_id]->image, bgr, cv::COLOR_GRAY2BGR), bgr);|' \
+    /root/ros2_ws/src/direct_visual_lidar_calibration/src/vlcal/common/visual_lidar_visualizer.cpp
+
+# 4) points_color_updater: 采 Vec3b BGR → Eigen RGB
+RUN sed -i \
+    -e 's|const unsigned char pix = image.at<std::uint8_t>(pt_2d.y(), pt_2d.x());|const auto pix = image.channels() == 3 ? image.at<cv::Vec3b>(pt_2d.y(), pt_2d.x()) : cv::Vec3b(image.at<std::uint8_t>(pt_2d.y(), pt_2d.x()), image.at<std::uint8_t>(pt_2d.y(), pt_2d.x()), image.at<std::uint8_t>(pt_2d.y(), pt_2d.x()));|' \
+    -e 's|const Eigen::Vector4f color(pix / 255.0f, pix / 255.0f, pix / 255.0f, 1.0f);|const Eigen::Vector4f color(pix[2] / 255.0f, pix[1] / 255.0f, pix[0] / 255.0f, 1.0f);|' \
+    /root/ros2_ws/src/direct_visual_lidar_calibration/src/vlcal/common/points_color_updater.cpp
+
+# 4b) preprocess.cpp equalizeHist 只能处理 1ch —— 改成 BGR→YCrCb→均衡 Y→BGR
+RUN sed -i 's|cv::equalizeHist(image.clone(), image);|if (image.channels() == 3) { cv::Mat ycrcb; cv::cvtColor(image, ycrcb, cv::COLOR_BGR2YCrCb); std::vector<cv::Mat> ch; cv::split(ycrcb, ch); cv::equalizeHist(ch[0].clone(), ch[0]); cv::merge(ch, ycrcb); cv::cvtColor(ycrcb, image, cv::COLOR_YCrCb2BGR); } else { cv::equalizeHist(image.clone(), image); }|' \
+    /root/ros2_ws/src/direct_visual_lidar_calibration/src/vlcal/preprocess/preprocess.cpp
+
+# 4c) NID cost 3ch bug —— 若 image 是 BGR, image.at<uint8_t> 只读 Blue 通道, NID 完全走偏
+#     必须转 BGR → gray luminance
+RUN sed -i 's|const double pixel = image.at<std::uint8_t>(pt_2d.y(), pt_2d.x()) / 255.0;|double pixel; if (image.channels() == 3) { const cv::Vec3b\& p = image.at<cv::Vec3b>(pt_2d.y(), pt_2d.x()); pixel = (0.114 * p[0] + 0.587 * p[1] + 0.299 * p[2]) / 255.0; } else { pixel = image.at<std::uint8_t>(pt_2d.y(), pt_2d.x()) / 255.0; }|' \
+    /root/ros2_ws/src/direct_visual_lidar_calibration/src/vlcal/calib/cost_calculator_nid.cpp
+
+# 4d) NIDCost normalized_image —— convertTo 不改通道, 3ch 情况必须先 BGR→Gray
+RUN sed -i 's|dataset\[i\]->image.convertTo(normalized_image, CV_64FC1, 1.0 / 255.0);|cv::Mat gray_source = dataset[i]->image; if (gray_source.channels() == 3) cv::cvtColor(gray_source, gray_source, cv::COLOR_BGR2GRAY); gray_source.convertTo(normalized_image, CV_64FC1, 1.0 / 255.0);|' \
+    /root/ros2_ws/src/direct_visual_lidar_calibration/src/vlcal/calib/visual_camera_calibration.cpp
+
+# 5) 重编 direct_visual_lidar_calibration (only this pkg, keep ceres etc.)
+WORKDIR /root/ros2_ws
+RUN /bin/bash -c "source /opt/ros/humble/setup.bash && colcon build --packages-select direct_visual_lidar_calibration --cmake-args -DCMAKE_BUILD_TYPE=Release" 2>&1 | tail -20

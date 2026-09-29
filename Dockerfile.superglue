@@ -1,0 +1,25 @@
+# 基于 koide3/direct_visual_lidar_calibration:humble 追加 SuperGlue + torch
+# 参考: https://github.com/koide3/direct_visual_lidar_calibration/blob/main/docker/humble/Dockerfile_with_superglue
+# 关键区别: 用 apt 装 python3-torch (Ubuntu 22.04 原生, ~200MB, 秒装)
+#           而不是 pip 装 torch (~2GB)
+FROM docker.1ms.run/koide3/direct_visual_lidar_calibration:humble
+
+# 阿里云 apt 镜像
+RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g; s|http://security.ubuntu.com|http://mirrors.aliyun.com|g' /etc/apt/sources.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git \
+      python3-pip \
+      python3-numpy \
+      python3-torch \
+      python3-torchvision \
+      python3-matplotlib \
+      python3-opencv \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# gitclone.com 镜像加速 SuperGlue clone (fallback: gitmirror.com)
+RUN (git clone --depth=1 https://gitclone.com/github.com/magicleap/SuperGluePretrainedNetwork /root/SuperGlue \
+      || git clone --depth=1 https://hub.gitmirror.com/https://github.com/magicleap/SuperGluePretrainedNetwork /root/SuperGlue)
+
+ENV PYTHONPATH=/root/SuperGlue:${PYTHONPATH}
