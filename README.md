@@ -47,15 +47,49 @@
 
 ### A. 首次标定（出厂做一次）
 
-**文档**：`calibration.md`（2026-09-29 定版，覆盖并替代旧版 `VISTARA_VPS_INPUT.md` 里 Step A-F 的 preprocess/calibrate 段）。
+**一条龙脚本**：`run_calibration.sh`（最新流程，封装所有 Step）
+**文档**：`calibration.md`（Dockerfile 制作 + 5 大踩坑点）
 
-**流程**：
-1. 做两个 Docker 镜像：`dvlc:superglue`（base + torch + SuperGlue）和 `dvlc:rgb`（+ RGB 支持）
-2. 采集 5-10 站静止 .hera + .insv（纹理丰富场景）
-3. 每站 `patch_session_with_gyro_bridge.py` 打锚 → `hera-convert` 转 .db3 → `panorama-stitch` 拼 .mp4 → `hera_to_rosbag.py` 打 ROS2 bag
-4. `docker run dvlc:rgb bash -c 'preprocess+find_matches+init+calibrate'`
-5. 从 `calib.json` 提 7 个数到 `T_lidar_camera.txt`
-6. `dvlc:rgb viewer` 做 X GUI 真 RGB 上色验收（NID < 0.7 良好）
+**一次性 Docker 镜像准备**：`dvlc:superglue`（base + torch + SuperGlue）和 `dvlc:rgb`（+ RGB NID 修补）—— 见 `calibration.md` 的 Dockerfile 节。
+
+**采集**：**至少 3 站**静止扫描（纹理丰富场景，典型 5-10 站更稳）。每站用 hera-desktop 产出以下 6 个文件放到 `DATA_ROOT/<N>/` 下：
+
+```
+DATA_ROOT/
+├── 1/
+│   ├── <stem>.hera                 ← hera-daemon 原始录制
+│   ├── <stem>.insv                 ← Insta 原始视频
+│   ├── <stem>.session.json         ← hera-daemon 原始
+│   ├── out.db3                     ← hera-desktop「hera_to_bag」卡片转的
+│   ├── metadata.yaml               ← out.db3 配套
+│   └── panorama.mp4                ← hera-desktop「全景拼接」卡片 template 算法拼的
+├── 2/ ...
+├── N/ ...
+```
+
+**一条龙跑**（本仓库同目录）：
+
+```bash
+./run_calibration.sh /path/to/DATA_ROOT
+# 可选: --no-viewer  (远端或无 X11)
+#       --docker-image dvlc:superglue  (灰度版验收)
+#       --helmet-dir   ...             (自定义脚本目录)
+```
+
+**内部 Step** （脚本自动做, 无需手动）：
+- **B1**: 每站 `patch_session_with_gyro_bridge.py`（打 `frame_0_host_ns` 到 session.json）
+- **C**: 每站 `hera_to_rosbag.py --target_fps 0.5` → `bags/scan_XX_bag/`
+- **D**: docker 跑 dvlc 四段：`preprocess (--dynamic_lidar_integration)` → `find_matches_superglue (--superglue indoor)` → `initial_guess_auto` → `calibrate (NID + xvfb-run)`
+- **E**: 从 `calibration_result/calib.json` 提 7 数写 `T_lidar_camera.txt`，脚本自动做 `|t|` 量级 sanity check
+- **F**: 自动打开 dvlc viewer（可 `--no-viewer` 关），同时产 SuperGlue 匹配图 `scan_XX_bag_superglue.png` 每站一张
+
+**验收**：
+- `|t|` 应在 **3-50 cm**（典型 Vistara 头盔 ~5-15 cm；<3cm 偏小、>50cm 跑飞）
+- 看 `calibration_result/scan_*_bag_superglue.png` 匹配密度（>50 对良好）
+- viewer 里点云投影到 ERP 边缘对齐（近景 <5 px）
+- NID < 0.7 良好，0.7-0.85 可用，>0.9 失败
+
+**出厂产物**：`DATA_ROOT/T_lidar_camera.txt`（TUM 格式：`tx ty tz qx qy qz qw`），随设备交付。
 
 **耗时**：~30-60 min 全程（含 SuperGlue CPU 匹配 + NID 精化）。
 
@@ -96,13 +130,13 @@ X_pano/
 | 文件 | 用途 |
 |---|---|
 | `README.md` | 本文件 — 仓库总览 |
-| `calibration.md` | **首次标定权威文档**（Dockerfile + 流程 + 5 大踩坑点）|
-| `VISTARA_VPS_INPUT.md` | **每次采集流程**（2 命令出 prior pose）|
+| **`run_calibration.sh`** | **一条龙首次标定脚本**（最新, 封装 B1→C→D→E→F 所有 Step, 推荐入口） |
+| `calibration.md` | 首次标定详细文档（Dockerfile 制作 + 5 大踩坑点）|
+| `VISTARA_VPS_INPUT.md` | 每次采集流程（2 命令出 prior pose）|
 | `patch_session_with_gyro_bridge.py` | gyro clock bridge 算视频第 0 帧 host_ns（精度 ±1-5 ms）|
 | `panorama_to_prior_poses.py` | ffmpeg 抽帧 + 按 host_ns 命名 + 查 traj_lidar 插值 T_world_camera |
-| `hera_to_rosbag.py` | 把 .hera (lidar+imu) + .mp4 (全景) 打包成 ROS2 bag (供 dvlc) |
-| `calibration.sh` | 单站标定壳子脚本 |
-| `run_calibration.sh` | 多站批量标定脚本 |
+| `hera_to_rosbag.py` | 把 .db3 (lidar+imu) + .mp4 (全景) 打包成 ROS2 bag (供 dvlc) |
+| `calibration.sh` | 单站标定壳子脚本（run_calibration.sh 之前的旧版） |
 | `overlay.py` | RGB 投影验证（点云投到 ERP 看对齐）|
 | `Dockerfile.superglue` | 构建 dvlc:superglue 镜像（dvlc + torch 1.8 + SuperGlue 权重）|
 | `Dockerfile.rgb.deploy` | 构建 dvlc:rgb 镜像（上面 + RGB NID 修补）|
